@@ -3,7 +3,6 @@ package main
 import (
 	"net/http"
 	"github.com/sirupsen/logrus"
-	"time"
 	"strconv"
 	"fmt"
 	"io/ioutil"
@@ -12,6 +11,7 @@ import (
 	"os/exec"
 	"os"
 	"bufio"
+	"crypto/tls"
 )
 
 type MV struct {
@@ -23,6 +23,7 @@ type MV struct {
 var (
 	log	=	logrus.New()
 	contextLogger = log.WithFields(logrus.Fields{})
+	ENVBLACKLIST = []string{"bacula"}
 )
 
 ////////////////////////////////////////
@@ -111,6 +112,16 @@ func getMetrics() (string) {
 			}
 		} 
 	}
+	// Environments HTTP Status
+	for _,s := range environments() {
+		if (getHTTPCodeEnvironment("https://bootstrap."+s+".hetzner.stratio.com")) {
+		salida +=`environment_http_status{environment="`+ s+`"} 1
+`
+		} else {
+		salida +=`environment_http_status{environment="`+ s+`"} 0
+`
+		}
+	} 
 	return salida
 }
 
@@ -123,9 +134,11 @@ func statusMachines(env string) ([]MV) { 				// Status machines of one environme
 	var machines []MV
     file, err := os.Open("/opt/"+env+"/dhcpd.conf")
     if err != nil {
-        log.Fatal(err)
+    	fmt.Println(err)
+    	file.Close()
+    	return machines
+        //log.Fatal(err)
     }
-    defer file.Close()
 
     scanner := bufio.NewScanner(file)
     for scanner.Scan() {
@@ -156,6 +169,7 @@ func statusMachines(env string) ([]MV) { 				// Status machines of one environme
 	if err := scanner.Err(); err != nil {
 		log.Fatal(err)
 	}
+	file.Close()
 
 	for i:=0; i<=len(mvs); i +=3 {
 		if (i<len(mvs)) {
@@ -169,6 +183,33 @@ func statusMachines(env string) ([]MV) { 				// Status machines of one environme
 		}		
 	}
 	return machines
+}
+
+func getHTTPCodeEnvironment(url string) (bool) {
+	var status bool
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}
+	client := &http.Client{Transport: tr}
+	resp, err := client.Get(url)
+	if err != nil {
+		fmt.Println(err)
+		status=false
+		return status
+	}
+	defer resp.Body.Close() 
+
+	//fmt.Println("HTTP Response Status:", resp.StatusCode, http.StatusText(resp.StatusCode))
+	
+	if resp.StatusCode >= 200 && resp.StatusCode <= 299 {
+		//fmt.Println("OK - HTTP 2XX response ")
+		status=true
+	} else {
+		//fmt.Println("ERROR - Not HTTP 2XX response")
+		status=false
+	}
+
+	return status
 }
 
 func localTapAddressesUp() ([]string) {				// Check status tap interfaces
@@ -207,9 +248,20 @@ func environments() ([]string) {					// Get environments listing opt directories
 		log.Fatal(err)
 	}
 	for _, f := range files {
-		env = append(env,f.Name())
+		if ( !isValueInList(f.Name(), ENVBLACKLIST) ) {
+			env = append(env,f.Name())
+		}
 	}
 	return env
+}
+
+func isValueInList(value string, list []string) bool {
+    for _, v := range list {
+        if v == value {
+            return true
+        }
+    }
+    return false
 }
 
 ////////////////////////////////////////
@@ -218,7 +270,7 @@ func environments() ([]string) {					// Get environments listing opt directories
 func main() {
 	// WEB SERVER
 	contextLogger.Info("Starting LibvirtInfraestructure-Exporter")
-
+	
 	http.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(getMetrics()))
 	})
@@ -234,4 +286,5 @@ func main() {
 					`))
 	})
 	log.Fatal(http.ListenAndServe(":9171", nil))
+
 }
